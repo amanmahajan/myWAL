@@ -1,2 +1,11 @@
-syntax = "proto3"
+syntax = "proto3";
+
+option go_package = "github.com/amanmahajan/myWAL/wal";
+
+message Entry{
+  uint64 seqNumber = 1 ;
+  bytes data = 2;
+  uint32 CRC = 3;
+  optional  bool  isCheckpoint = 4;
+}
 

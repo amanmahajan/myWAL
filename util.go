@@ -1,6 +1,9 @@
 package wal
 
 import (
+	"errors"
+	"google.golang.org/protobuf/proto"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,4 +39,35 @@ func findLastSegmentIndex(files []string) (int, error) {
 	}
 	return currIdx, nil
 
+}
+
+func deserializeAndCheckCRC(data []byte) (*Entry, error) {
+	var entry *Entry
+	UnMarshall(entry, data)
+	if !verifyCRC(entry) {
+		return nil, errors.New("invalid CRC")
+	}
+	return entry, nil
+
+}
+
+func verifyCRC(entry *Entry) bool {
+	val := crc32.ChecksumIEEE(append(entry.GetData(), byte(entry.GetSeqNumber())))
+	return val == entry.GetCRC()
+}
+
+func Marshall(entry *Entry) []byte {
+	val, err := proto.Marshal(entry)
+	if err != nil {
+		panic(err)
+	}
+
+	return val
+}
+
+func UnMarshall(entry *Entry, data []byte) {
+	err := proto.Unmarshal(data, entry)
+	if err != nil {
+		panic(err)
+	}
 }
