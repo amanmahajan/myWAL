@@ -3,6 +3,7 @@ package wal
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -106,4 +107,59 @@ The function iterates through the log file, reading each entry’s size.
   - When it reaches the end of the file (io.EOF), it seeks back to the last valid entry using the stored offset and reads its data.
   - The function then unmarshals and verifies the entry, and finally returns the last valid entry in the log.
 */
-func (w *WAL) getLastLogEntry(wal *WAL)
+
+func (w *WAL) getLastLogEntry() (*Entry, error) {
+	file, err := os.OpenFile(w.currSegment.Name(), os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var lastSize int32
+	var offset int64
+	var entry *Entry
+
+	for {
+		var currSize int32
+
+		if err := binary.Read(file, binary.BigEndian, &currSize); err != nil {
+			if err == io.EOF {
+				// Handle End of file Err
+				if offset == 0 {
+					// no offset found
+					return entry, nil
+				}
+				// 	If the offset is not 0, it seeks to the last known position (offset) where the last valid entry was recorded.
+				if _, err := file.Seek(offset, io.SeekStart); err != nil {
+					return nil, err
+				}
+				// Handle reading of data of the size
+
+				data := make([]byte, lastSize)
+				if _, err := io.ReadFull(file, data); err != nil {
+					return nil, err
+				}
+
+				entry, err = deserializeAndCheckCRC(data)
+				if err != nil {
+					return nil, err
+				}
+				return entry, nil
+
+			}
+		}
+
+		// Get current offset
+		offset, err = file.Seek(0, io.SeekCurrent)
+		lastSize = currSize
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Skip to the next entry.
+		if _, err := file.Seek(int64(currSize), io.SeekCurrent); err != nil {
+			return nil, err
+		}
+	}
+}
