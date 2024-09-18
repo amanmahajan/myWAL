@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -96,7 +97,14 @@ func OpenWal(fileDir string, enableSync bool, maxFileSize int64, maxSegmentSize 
 	}
 
 	// set last sequence number
+	entry, err := res.getLastLogEntry()
+	if err != nil {
+		return nil, err
+	}
+	res.lastSeqNum = entry.SeqNumber
 
+	// Firing a go routine that will sync continuously this WAL file to disk after the interval
+	go res.keepSyncing()
 	return res, nil
 
 }
@@ -161,5 +169,50 @@ func (w *WAL) getLastLogEntry() (*Entry, error) {
 		if _, err := file.Seek(int64(currSize), io.SeekCurrent); err != nil {
 			return nil, err
 		}
+	}
+}
+
+// Sync This method flushes the in memory buffer data into disk.
+// If the fsync is enabled
+func (w *WAL) Sync() error {
+	err := w.bufferW.Flush()
+	if err != nil {
+		return err
+	}
+	if w.shouldFsync {
+		err := w.currSegment.Sync()
+		if err != nil {
+			return err
+		}
+	}
+	w.resetTimer()
+	return nil
+}
+
+func (w *WAL) resetTimer() {
+	w.timerSync.Reset(SyncInterval)
+}
+
+/*
+•
+This case is triggered when a timer (w.timerSync) goes off.
+The .C represents the channel associated with the timer, and when the timer fires, a value is received from this channel.
+Purpose: Every time the timer triggers, the WAL will attempt to flush (sync) any buffered data to disk.
+*/
+func (w *WAL) keepSyncing() {
+	for {
+		select {
+		case <-w.timerSync.C:
+			w.mutex.Lock()
+			err := w.Sync()
+			w.mutex.Unlock()
+			if err != nil {
+				log.Printf("wal: syncing failed: %v", err)
+			}
+		case <-w.ctx.Done():
+			return
+
+		}
+
 	}
 }
