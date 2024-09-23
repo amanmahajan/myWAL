@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -215,4 +219,154 @@ func (w *WAL) keepSyncing() {
 		}
 
 	}
+}
+
+///////////// WRITE ENTRY LOGIC
+
+func (w *WAL) WriteEntry(data []byte, isCheckpoint bool) error {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	// Check if we  need to rotate the logs first
+
+	err := w.RotateLogsIfSizeIsLarge()
+	if err != nil {
+		return err
+	}
+
+	w.lastSeqNum++
+	entry := &Entry{
+
+		SeqNumber: w.lastSeqNum,
+		Data:      data,
+		CRC:       crc32.ChecksumIEEE(append(data, byte(w.lastSeqNum))), // Appending last sequence no as a byte
+	}
+
+	if isCheckpoint {
+		err := w.Sync()
+		if err != nil {
+			log.Printf("wal: checkpointing failed: %v", err)
+		}
+
+		entry.IsCheckpoint = &isCheckpoint
+	}
+	return w.writeEntryToBuffer(entry)
+
+}
+
+/*
+This function writes a marshalled Entry object to a buffer in two parts:
+
+	1.	Size: First, it writes the size (in bytes) of the marshalled entry. This allows the reader to know how much data to expect.
+	2.	Data: Then, it writes the actual marshalled entry to the buffer.
+
+*/
+
+func (w *WAL) writeEntryToBuffer(entry *Entry) error {
+
+	if entry == nil {
+		return nil
+	}
+
+	marshalled := Marshall(entry)
+	size := len(marshalled)
+	// Write size of marshalled data
+	if err := binary.Write(w.bufferW, binary.LittleEndian, size); err != nil {
+		return err
+	}
+	/// Write the actual marshalled data
+	_, err := w.bufferW.Write(marshalled)
+	return err
+}
+
+func (w *WAL) RotateLogsIfSizeIsLarge() error {
+	fileInfo, err := w.currSegment.Stat()
+	if err != nil {
+		return err
+	}
+	currSize := fileInfo.Size() + int64(w.bufferW.Size())
+	if currSize > w.maxFileSize {
+		// Rotate the log
+		err := w.RotateLogs()
+		if err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+func (w *WAL) RotateLogs() error {
+
+	// Sync the current file
+	err := w.Sync()
+	if err != nil {
+		return err
+	}
+
+	// Close the current file
+	err = w.currSegment.Close()
+	if err != nil {
+		return err
+	}
+
+	w.currSegmentIdx++
+
+	if w.currSegmentIdx >= w.maxSegmentSize {
+		// Delete the old segment
+		err := w.deleteOldestSegment()
+		if err != nil {
+			return err
+		}
+	}
+
+	segmentFile, err := createSegmentFile(w.directory, w.currSegmentIdx)
+	if err != nil {
+		return err
+	}
+	w.currSegment = segmentFile
+	w.bufferW = bufio.NewWriter(segmentFile)
+	return nil
+
+}
+
+func (w *WAL) deleteOldestSegment() error {
+	files, err := filepath.Glob(filepath.Join(w.directory, SegmentPrefix+"*"))
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	if len(files) > 0 {
+		val, err := w.findTheOldestSegment(files)
+		if err != nil {
+			return err
+		}
+		err = os.Remove(val)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+
+}
+
+func (w *WAL) findTheOldestSegment(files []string) (string, error) {
+	oldIdx := math.MaxInt
+	oldSegmentFilePath := ""
+
+	for _, file := range files {
+		valStr := strings.Trim(file, filepath.Join(w.directory, SegmentPrefix))
+		idx, err := strconv.Atoi(valStr)
+		if err != nil {
+			return "", err
+		}
+		if idx < oldIdx {
+			oldIdx = idx
+			oldSegmentFilePath = file
+		}
+	}
+	return oldSegmentFilePath, nil
+
 }
