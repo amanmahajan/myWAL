@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -368,5 +369,75 @@ func (w *WAL) findTheOldestSegment(files []string) (string, error) {
 		}
 	}
 	return oldSegmentFilePath, nil
+
+}
+
+///////////// Read ALL Entries/////////////////////////
+
+func (w *WAL) ReadAllEntries(readFromCheckpoint bool) ([]*Entry, error) {
+	if w.currSegment == nil {
+		return nil, errors.New("wal: no current segment")
+	}
+
+	file, err := os.OpenFile(w.currSegment.Name(), os.O_RDONLY, 644)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	entries, checkpoint, err := readAllEntriesFromFile(file, readFromCheckpoint)
+	if err != nil {
+		return entries, err
+	}
+
+	if readFromCheckpoint && checkpoint <= 0 {
+		return entries[:0], nil
+	}
+	return entries, nil
+
+}
+
+// Functionality:
+// readAllEntriesFromFile reads all entries from the given file, optionally starting from a checkpoint.
+// It deserializes each entry and verifies its CRC. If 'readFromCheckpoint' is true, the function
+//resets the entries slice upon encountering a checkpoint, reading only from that point onward.
+// Returns a slice of entries, the checkpoint value, and an error if any issues occur during reading.
+
+func readAllEntriesFromFile(file *os.File, readFromCheckpoint bool) ([]*Entry, uint64, error) {
+	if file == nil {
+		return nil, 0, fmt.Errorf("file is nil")
+	}
+	var entries []*Entry
+	checkpoint := uint64(0)
+
+	for {
+		var size int32
+		err := binary.Read(file, binary.LittleEndian, &size)
+
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return entries, checkpoint, err
+
+		}
+		data := make([]byte, size)
+		if _, err := io.ReadFull(file, data); err != nil {
+			return entries, checkpoint, err
+		}
+
+		entry, err := deserializeAndCheckCRC(data)
+		if err != nil {
+			return entries, checkpoint, err
+		}
+
+		if readFromCheckpoint && entry.GetIsCheckpoint() {
+			// Empty the previous entries beccause we want to read from the checkpoint
+			entries = entries[:0]
+		}
+		entries = append(entries, entry)
+
+	}
+	return entries, checkpoint, nil
 
 }
